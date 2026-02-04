@@ -11,6 +11,7 @@ pub mod confirm_close_pane;
 pub mod copy;
 pub mod debug;
 pub mod launcher;
+pub mod mode_selector;
 pub mod prompt;
 pub mod quickselect;
 pub mod selector;

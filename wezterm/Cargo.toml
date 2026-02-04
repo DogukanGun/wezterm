@@ -13,6 +13,11 @@ chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 clap_complete_fig.workspace = true
+keyring.workspace = true
+bip39 = { workspace = true, features = ["rand"] }
+bs58.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
 codec.workspace = true
 config.workspace = true
 env-bootstrap.workspace = true

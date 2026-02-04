@@ -681,6 +681,15 @@ impl Tab {
         self.inner.lock().remove_pane(pane_id)
     }
 
+    /// Replace a pane in-place and return the previous pane.
+    pub fn replace_pane(
+        &self,
+        pane_id: PaneId,
+        pane: Arc<dyn Pane>,
+    ) -> anyhow::Result<Option<Arc<dyn Pane>>> {
+        self.inner.lock().replace_pane(pane_id, pane)
+    }
+
     pub fn can_close_without_prompting(&self, reason: CloseReason) -> bool {
         self.inner.lock().can_close_without_prompting(reason)
     }
@@ -1806,6 +1815,56 @@ impl TabInner {
             Ok(c) => self.pane = Some(c.tree()),
             Err(_) => panic!("tried to assign root pane to non-empty tree"),
         }
+    }
+
+    fn replace_pane(
+        &mut self,
+        pane_id: PaneId,
+        new_pane: Arc<dyn Pane>,
+    ) -> anyhow::Result<Option<Arc<dyn Pane>>> {
+        let prior_active = self.get_active_pane();
+        let root_size = self.size;
+        let mut cursor = self.pane.take().unwrap().cursor();
+        let mut replaced: Option<Arc<dyn Pane>> = None;
+
+        loop {
+            if cursor.is_leaf() {
+                let pane_size = if let Some((branch, Some(parent))) = cursor.path_to_root().next() {
+                    if branch == PathBranch::IsRight {
+                        parent.second
+                    } else {
+                        parent.first
+                    }
+                } else {
+                    root_size
+                };
+
+                let pane = cursor.leaf_mut().unwrap();
+                if pane.pane_id() == pane_id {
+                    let old = std::mem::replace(pane, Arc::clone(&new_pane));
+                    new_pane.resize(pane_size).ok();
+                    if self.zoomed.as_ref().map(|p| p.pane_id()) == Some(old.pane_id()) {
+                        new_pane.set_zoomed(true);
+                        self.zoomed.replace(Arc::clone(&new_pane));
+                    }
+                    replaced = Some(old);
+                }
+            }
+
+            match cursor.preorder_next() {
+                Ok(c) => cursor = c,
+                Err(c) => {
+                    self.pane.replace(c.tree());
+                    break;
+                }
+            }
+        }
+
+        if replaced.is_some() {
+            self.advise_focus_change(prior_active);
+        }
+
+        Ok(replaced)
     }
 
     fn cell_dimensions(&self) -> TerminalSize {

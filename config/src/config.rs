@@ -1,7 +1,8 @@
 use crate::background::{BackgroundLayer, Gradient};
 use crate::bell::{AudibleBell, EasingFunction, VisualBell};
 use crate::color::{
-    ColorSchemeFile, HsbTransform, Palette, SrgbaTuple, TabBarStyle, WindowFrameConfig,
+    ColorSchemeFile, HsbTransform, Palette, RgbaColor, SrgbaTuple, TabBarColor, TabBarColors,
+    TabBarStyle, WindowFrameConfig,
 };
 use crate::daemon::DaemonOptions;
 use crate::exec_domain::ExecDomain;
@@ -23,7 +24,7 @@ use crate::wsl::WslDomain;
 use crate::{
     default_config_with_overrides_applied, default_one_point_oh, default_one_point_oh_f64,
     default_true, default_win32_acrylic_accent_color, CellWidth, GpuInfo,
-    IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods, RgbaColor,
+    IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods,
     SerialDomain, SystemBackdrop, WebGpuPowerPreference, CONFIG_DIRS, CONFIG_FILE_OVERRIDE,
     CONFIG_OVERRIDES, CONFIG_SKIP, HOME_DIR,
 };
@@ -37,6 +38,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::convert::TryFrom;
 use termwiz::hyperlink;
 use termwiz::surface::CursorShape;
 use wezterm_bidi::ParagraphDirectionHint;
@@ -47,6 +49,146 @@ use wezterm_input_types::{
     UIKeyCapRendering, WindowDecorations,
 };
 use wezterm_term::TerminalSize;
+
+#[derive(Debug, Clone, FromDynamic, ToDynamic)]
+#[dynamic(into = "String", try_from = "String")]
+pub enum AiProvider {
+    Ollama,
+    OpenAI,
+    Anthropic,
+}
+
+fn default_ai_provider() -> AiProvider {
+    AiProvider::Ollama
+}
+
+#[derive(Debug, Clone, FromDynamic, ToDynamic)]
+#[dynamic(into = "String", try_from = "String")]
+pub enum DefaultPaneMode {
+    Terminal,
+    Ai,
+}
+
+impl TryFrom<String> for AiProvider {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> anyhow::Result<Self> {
+        match value.as_str() {
+            "Ollama" | "ollama" => Ok(Self::Ollama),
+            "OpenAI" | "openai" | "open_ai" => Ok(Self::OpenAI),
+            "Anthropic" | "anthropic" => Ok(Self::Anthropic),
+            _ => anyhow::bail!(
+                "invalid AiProvider {}, expected: Ollama, OpenAI, Anthropic",
+                value
+            ),
+        }
+    }
+}
+
+impl From<AiProvider> for String {
+    fn from(value: AiProvider) -> Self {
+        match value {
+            AiProvider::Ollama => "Ollama".to_string(),
+            AiProvider::OpenAI => "OpenAI".to_string(),
+            AiProvider::Anthropic => "Anthropic".to_string(),
+        }
+    }
+}
+
+impl From<&AiProvider> for String {
+    fn from(value: &AiProvider) -> Self {
+        match value {
+            AiProvider::Ollama => "Ollama".to_string(),
+            AiProvider::OpenAI => "OpenAI".to_string(),
+            AiProvider::Anthropic => "Anthropic".to_string(),
+        }
+    }
+}
+
+impl TryFrom<String> for DefaultPaneMode {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> anyhow::Result<Self> {
+        match value.as_str() {
+            "Terminal" | "terminal" => Ok(Self::Terminal),
+            "Ai" | "AI" | "ai" => Ok(Self::Ai),
+            _ => anyhow::bail!("invalid DefaultPaneMode {}, expected: Terminal, Ai", value),
+        }
+    }
+}
+
+impl From<DefaultPaneMode> for String {
+    fn from(value: DefaultPaneMode) -> Self {
+        match value {
+            DefaultPaneMode::Terminal => "Terminal".to_string(),
+            DefaultPaneMode::Ai => "Ai".to_string(),
+        }
+    }
+}
+
+impl From<&DefaultPaneMode> for String {
+    fn from(value: &DefaultPaneMode) -> Self {
+        match value {
+            DefaultPaneMode::Terminal => "Terminal".to_string(),
+            DefaultPaneMode::Ai => "Ai".to_string(),
+        }
+    }
+}
+
+fn default_pane_mode() -> DefaultPaneMode {
+    DefaultPaneMode::Terminal
+}
+
+fn default_ollama_base_url() -> String {
+    "http://localhost:11434/v1".to_string()
+}
+
+fn solana_tab_bar_colors() -> TabBarColors {
+    TabBarColors {
+        background: Some((11, 15, 26).into()),
+        active_tab: Some(TabBarColor {
+            bg_color: (20, 26, 43).into(),
+            fg_color: (230, 241, 255).into(),
+            intensity: wezterm_term::Intensity::Bold,
+            ..Default::default()
+        }),
+        inactive_tab: Some(TabBarColor {
+            bg_color: (11, 15, 26).into(),
+            fg_color: (138, 160, 200).into(),
+            ..Default::default()
+        }),
+        inactive_tab_hover: Some(TabBarColor {
+            bg_color: (20, 26, 43).into(),
+            fg_color: (230, 241, 255).into(),
+            ..Default::default()
+        }),
+        new_tab: Some(TabBarColor {
+            bg_color: (11, 15, 26).into(),
+            fg_color: (20, 241, 149).into(),
+            ..Default::default()
+        }),
+        new_tab_hover: Some(TabBarColor {
+            bg_color: (20, 26, 43).into(),
+            fg_color: (20, 241, 149).into(),
+            ..Default::default()
+        }),
+        inactive_tab_edge: Some((30, 42, 58).into()),
+        inactive_tab_edge_hover: Some((30, 42, 58).into()),
+    }
+}
+
+fn apply_solana_window_frame(frame: &mut WindowFrameConfig) {
+    frame.active_titlebar_bg = (11, 15, 26).into();
+    frame.inactive_titlebar_bg = (11, 15, 26).into();
+    frame.active_titlebar_fg = (230, 241, 255).into();
+    frame.inactive_titlebar_fg = (138, 160, 200).into();
+    frame.active_titlebar_border_bottom = (30, 42, 58).into();
+    frame.inactive_titlebar_border_bottom = (30, 42, 58).into();
+    frame.button_fg = (230, 241, 255).into();
+    frame.button_bg = (11, 15, 26).into();
+    frame.button_hover_fg = (20, 241, 149).into();
+    frame.button_hover_bg = (30, 42, 58).into();
+}
 
 #[derive(Debug, Clone, FromDynamic, ToDynamic, ConfigMeta)]
 pub struct Config {
@@ -138,6 +280,38 @@ pub struct Config {
     /// Otherwise, it will spawn a new window.
     #[dynamic(default)]
     pub prefer_to_spawn_tabs: bool,
+
+    /// Enable the optional AI module (AI panes and AI-related actions).
+    #[dynamic(default)]
+    pub enable_ai_module: bool,
+
+    /// Default pane type for new tabs when AI module is enabled.
+    #[dynamic(default = "default_pane_mode")]
+    pub default_pane_mode: DefaultPaneMode,
+
+    /// Which AI provider to use for AI panes.
+    #[dynamic(default = "default_ai_provider")]
+    pub ai_provider: AiProvider,
+
+    /// Optional model name to send to the AI provider.
+    #[dynamic(default)]
+    pub ai_model: Option<String>,
+
+    /// Base URL for the Ollama OpenAI-compatible endpoint.
+    #[dynamic(default = "default_ollama_base_url")]
+    pub ai_ollama_base_url: String,
+
+    /// Optional Solana RPC URL for CLI tools and AI integrations.
+    #[dynamic(default)]
+    pub solana_rpc_url: Option<String>,
+
+    /// Enable the code agent mode.
+    #[dynamic(default)]
+    pub code_mode_enabled: bool,
+
+    /// Auto-accept command execution in code mode.
+    #[dynamic(default)]
+    pub code_mode_auto_accept: bool,
 
     #[dynamic(default)]
     pub window_frame: WindowFrameConfig,
@@ -1380,6 +1554,13 @@ impl Config {
         // Load any additional color schemes into the color_schemes map
         cfg.load_color_schemes(&cfg.compute_color_scheme_dirs())
             .ok();
+
+        cfg.color_scheme = Some("SolanaFuturistic".to_string());
+        cfg.use_fancy_tab_bar = true;
+        apply_solana_window_frame(&mut cfg.window_frame);
+        let mut colors = cfg.colors.clone().unwrap_or_default();
+        colors.tab_bar = Some(solana_tab_bar_colors());
+        cfg.colors = Some(colors);
 
         if let Some(scheme) = cfg.color_scheme.as_ref() {
             match cfg.resolve_color_scheme() {

@@ -1,6 +1,7 @@
 use crate::spawn::SpawnWhere;
 use config::keyassignment::{SpawnCommand, SpawnTabDomain};
 use config::TermConfig;
+use mux::pane::PaneId;
 use std::sync::Arc;
 
 impl super::TermWindow {
@@ -32,5 +33,21 @@ impl super::TermWindow {
             },
             SpawnWhere::NewTab,
         );
+    }
+
+    pub fn spawn_command_replace_pane(
+        &self,
+        spawn: &SpawnCommand,
+        pane_id: PaneId,
+        size: wezterm_term::TerminalSize,
+    ) {
+        let term_config = Arc::new(TermConfig::with_config(self.config.clone()));
+        crate::spawn::spawn_command_impl(
+            spawn,
+            SpawnWhere::ReplacePane(pane_id),
+            size,
+            Some(self.mux_window_id),
+            term_config,
+        )
     }
 }

@@ -2,6 +2,8 @@
 use super::renderstate::*;
 use super::utilsprites::RenderMetrics;
 use crate::colorease::ColorEase;
+use crate::ai;
+use crate::code_mode;
 use crate::frontend::{front_end, try_front_end};
 use crate::inputmap::InputMap;
 use crate::overlay::{
@@ -206,6 +208,31 @@ pub struct PaneState {
     pub mouse_terminal_coords: Option<(ClickPosition, StableRowIndex)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneMode {
+    Terminal,
+    Ai,
+    Code,
+}
+
+impl PaneMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Terminal => Self::Ai,
+            Self::Ai => Self::Code,
+            Self::Code => Self::Terminal,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "Terminal",
+            Self::Ai => "AI",
+            Self::Code => "Code",
+        }
+    }
+}
+
 /// Data used when synchronously formatting pane and window titles
 #[derive(Debug, Clone)]
 pub struct TabInformation {
@@ -393,6 +420,7 @@ pub struct TermWindow {
     fancy_tab_bar: Option<box_model::ComputedElement>,
     pub right_status: String,
     pub left_status: String,
+    pub current_mode: PaneMode,
     last_ui_item: Option<UIItem>,
     /// Tracks whether the current mouse-down event is part of click-focus.
     /// If so, we ignore mouse events until released
@@ -714,6 +742,7 @@ impl TermWindow {
             fancy_tab_bar: None,
             right_status: String::new(),
             left_status: String::new(),
+            current_mode: PaneMode::Terminal,
             last_mouse_coords: (0, -1),
             window_drag_position: None,
             current_mouse_event: None,
@@ -831,6 +860,7 @@ impl TermWindow {
         )
         .await?;
         tw.borrow_mut().window.replace(window.clone());
+        tw.borrow_mut().update_mode_status();
 
         Self::apply_icon(&window)?;
 
@@ -2300,6 +2330,112 @@ impl TermWindow {
         promise::spawn::spawn(future).detach();
     }
 
+    fn update_mode_status(&self) {
+        if let Some(window) = self.window.clone() {
+            let status = format!(
+                "Mode: {}  (Shift+Tab to switch)",
+                self.current_mode.as_str()
+            );
+            window.notify(TermWindowNotif::SetLeftStatus(status));
+        }
+    }
+
+    fn set_current_mode(&mut self, mode: PaneMode) {
+        self.current_mode = mode;
+        self.update_mode_status();
+    }
+
+    fn terminal_size_from_pane(&self, pane: &Arc<dyn Pane>) -> TerminalSize {
+        let dims = pane.get_dimensions();
+        TerminalSize {
+            cols: dims.cols,
+            rows: dims.viewport_rows,
+            pixel_width: self.render_metrics.cell_size.width as usize * dims.cols,
+            pixel_height: self.render_metrics.cell_size.height as usize * dims.viewport_rows,
+            dpi: dims.dpi,
+        }
+    }
+
+    fn replace_active_pane(&mut self, new_pane: Arc<dyn Pane>) -> anyhow::Result<()> {
+        let mux = Mux::get();
+        let tab = mux
+            .get_active_tab_for_window(self.mux_window_id)
+            .ok_or_else(|| anyhow::anyhow!("no active tab"))?;
+        let pane = self
+            .get_active_pane_no_overlay()
+            .ok_or_else(|| anyhow::anyhow!("no active pane"))?;
+        if let Some(old) = tab.replace_pane(pane.pane_id(), Arc::clone(&new_pane))? {
+            old.kill();
+            mux.remove_pane(old.pane_id());
+        }
+        Ok(())
+    }
+
+    fn activate_current_mode(&mut self) -> anyhow::Result<()> {
+        match self.current_mode {
+            PaneMode::Terminal => {
+                let pane = self
+                    .get_active_pane_no_overlay()
+                    .ok_or_else(|| anyhow::anyhow!("no active pane"))?;
+                let size = self.terminal_size_from_pane(&pane);
+                self.spawn_command_replace_pane(&SpawnCommand::default(), pane.pane_id(), size);
+            }
+            PaneMode::Ai => {
+                if !self.config.enable_ai_module {
+                    log::warn!("AI module is disabled; enable_ai_module=true to use AI panes");
+                } else if let Some(tab) = Mux::get().get_active_tab_for_window(self.mux_window_id) {
+                    let pane = tab
+                        .get_active_pane()
+                        .ok_or_else(|| anyhow::anyhow!("no active pane"))?;
+                    let size = self.terminal_size_from_pane(&pane);
+                    let new_pane = ai::spawn_ai_pane(size, self.config.clone())?;
+                    self.replace_active_pane(new_pane)?;
+                }
+            }
+            PaneMode::Code => {
+                if !self.config.code_mode_enabled {
+                    log::warn!("Code mode is disabled; enable code_mode_enabled=true");
+                } else if let Some(tab) = Mux::get().get_active_tab_for_window(self.mux_window_id) {
+                    let pane = tab
+                        .get_active_pane()
+                        .ok_or_else(|| anyhow::anyhow!("no active pane"))?;
+                    let size = self.terminal_size_from_pane(&pane);
+                    let new_pane = code_mode::spawn_code_mode_pane(size, self.config.clone())?;
+                    self.replace_active_pane(new_pane)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cycle_mode(&mut self) -> anyhow::Result<()> {
+        let next = self.current_mode.next();
+        self.set_current_mode(next);
+        self.activate_current_mode()
+    }
+
+    fn show_mode_selector(&mut self) {
+        let mux = Mux::get();
+        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+            Some(tab) => tab,
+            None => return,
+        };
+
+        let current = self.current_mode;
+        let window = self.window.clone().unwrap();
+        let (overlay, future) = start_overlay(self, &tab, move |_tab_id, term| {
+            let mode = crate::overlay::mode_selector::select_mode(term, current)?;
+            window.notify(TermWindowNotif::Apply(Box::new(move |term_window| {
+                term_window.set_current_mode(mode);
+                let _ = term_window.activate_current_mode();
+            })));
+            Ok(())
+        });
+        self.assign_overlay(tab.tab_id(), overlay);
+        promise::spawn::spawn(future).detach();
+    }
+
     fn show_prompt_input_line(&mut self, args: &PromptInputLine) {
         let mux = Mux::get();
         let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
@@ -2642,6 +2778,42 @@ impl TermWindow {
             }
             SpawnWindow => {
                 self.spawn_command(&SpawnCommand::default(), SpawnWhere::NewWindow);
+            }
+            SpawnAIPane => {
+                if !self.config.enable_ai_module {
+                    log::warn!("AI module is disabled; enable_ai_module=true to use AI panes");
+                } else if let Some(tab) = Mux::get().get_active_tab_for_window(self.mux_window_id) {
+                    let size = tab.get_size();
+                    ai::spawn_ai_tab_in_window(size, Some(self.mux_window_id), self.config.clone())?;
+                }
+            }
+            SpawnSolanaAIPane => {
+                let mut spawn = SpawnCommand::default();
+                spawn.label = Some("Solana AI".to_string());
+                spawn.args = Some(vec![
+                    "wezterm".to_string(),
+                    "solana".to_string(),
+                    "agent".to_string(),
+                ]);
+                self.spawn_command(&spawn, SpawnWhere::NewTab);
+            }
+            SpawnCodeModePane => {
+                if !self.config.code_mode_enabled {
+                    log::warn!("Code mode is disabled; enable code_mode_enabled=true");
+                } else if let Some(tab) = Mux::get().get_active_tab_for_window(self.mux_window_id) {
+                    let size = tab.get_size();
+                    code_mode::spawn_code_mode_tab_in_window(
+                        size,
+                        Some(self.mux_window_id),
+                        self.config.clone(),
+                    )?;
+                }
+            }
+            CyclePaneMode => {
+                self.cycle_mode()?;
+            }
+            SelectPaneMode => {
+                self.show_mode_selector();
             }
             SpawnCommandInNewTab(spawn) => {
                 self.spawn_command(spawn, SpawnWhere::NewTab);

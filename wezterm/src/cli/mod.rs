@@ -18,6 +18,7 @@ mod rename_workspace;
 mod send_text;
 mod set_tab_title;
 mod set_window_title;
+mod solana;
 mod spawn_command;
 mod split_pane;
 mod tls_creds;
@@ -163,9 +164,16 @@ Outputs the pane-id for the newly created pane on success"
     /// Zoom, unzoom, or toggle zoom state
     #[command(name = "zoom-pane", rename_all = "kebab")]
     ZoomPane(zoom_pane::ZoomPane),
+
+    #[command(name = "solana", about = "Solana wallet commands")]
+    Solana(solana::SolanaCommand),
 }
 
 async fn run_cli_async(opts: &crate::Opt, cli: CliCommand) -> anyhow::Result<()> {
+    if let CliSubCommand::Solana(cmd) = &cli.sub {
+        return cmd.clone().run().await;
+    }
+
     let mut ui = mux::connui::ConnectionUI::new_headless();
     let initial = true;
 
@@ -199,6 +207,7 @@ async fn run_cli_async(opts: &crate::Opt, cli: CliCommand) -> anyhow::Result<()>
         CliSubCommand::SetWindowTitle(cmd) => cmd.run(client).await,
         CliSubCommand::RenameWorkspace(cmd) => cmd.run(client).await,
         CliSubCommand::ZoomPane(cmd) => cmd.run(client).await,
+        CliSubCommand::Solana(cmd) => cmd.run().await,
     }
 }
 

@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context};
 use clap::builder::ValueParser;
 use clap::{Parser, ValueHint};
 use config::keyassignment::{SpawnCommand, SpawnTabDomain};
-use config::{ConfigHandle, SerialDomain, SshDomain, SshMultiplexing};
+use config::{ConfigHandle, DefaultPaneMode, SerialDomain, SshDomain, SshMultiplexing};
 use mux::activity::Activity;
 use mux::domain::{Domain, LocalDomain};
 use mux::Mux;
@@ -35,6 +35,11 @@ use wezterm_mux_server_impl::update_mux_domains;
 use wezterm_toast_notification::*;
 
 mod colorease;
+mod ai;
+mod ollama;
+mod first_run;
+mod code_mode;
+mod mermaid_overlay;
 mod commands;
 mod customglyph;
 mod download;
@@ -175,7 +180,7 @@ async fn async_run_ssh(opts: SshCommand) -> anyhow::Result<()> {
     mux.set_default_domain(&domain);
 
     let should_publish = false;
-    async_run_terminal_gui(cmd, start_command, should_publish).await
+    async_run_terminal_gui(cmd, start_command, should_publish, false, None).await
 }
 
 fn run_ssh(opts: SshCommand) -> anyhow::Result<()> {
@@ -226,7 +231,7 @@ async fn async_run_serial(opts: SerialCommand) -> anyhow::Result<()> {
     mux.add_domain(&domain);
 
     let should_publish = false;
-    async_run_terminal_gui(cmd, start_command, should_publish).await
+    async_run_terminal_gui(cmd, start_command, should_publish, false, None).await
 }
 
 fn run_serial(config: config::ConfigHandle, opts: SerialCommand) -> anyhow::Result<()> {
@@ -331,6 +336,12 @@ async fn spawn_tab_in_domain_if_mux_is_empty(
     });
 
     let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi());
+    if config.enable_ai_module && matches!(config.default_pane_mode, DefaultPaneMode::Ai) {
+        let size = config.initial_size(dpi as u32, Some(cell_pixel_dims(&config, dpi)?));
+        ai::spawn_ai_tab_in_window(size, Some(window_id), config.clone())?;
+        trigger_and_log_gui_attached(MuxDomain(domain.domain_id())).await;
+        return Ok(());
+    }
     let _tab = domain
         .spawn(
             config.initial_size(dpi as u32, Some(cell_pixel_dims(&config, dpi)?)),
@@ -409,7 +420,10 @@ async fn async_run_terminal_gui(
     cmd: Option<CommandBuilder>,
     opts: StartCommand,
     should_publish: bool,
+    skip_config: bool,
+    config_file: Option<OsString>,
 ) -> anyhow::Result<()> {
+    log::info!("async_run_terminal_gui starting");
     let unix_socket_path =
         config::RUNTIME_DIR.join(format!("gui-sock-{}", unsafe { libc::getpid() }));
     std::env::set_var("WEZTERM_UNIX_SOCKET", unix_socket_path.clone());
@@ -489,7 +503,16 @@ async fn async_run_terminal_gui(
             trigger_and_log_gui_attached(MuxDomain(domain.domain_id())).await;
         }
     }
-    spawn_tab_in_domain_if_mux_is_empty(cmd, is_connecting, domain, opts.workspace).await
+    log::info!("Spawning initial tab if needed");
+    let result =
+        spawn_tab_in_domain_if_mux_is_empty(cmd, is_connecting, domain, opts.workspace).await;
+    log::info!("async_run_terminal_gui finished");
+
+    log::info!("first-run wizard: post-window check");
+    if let Err(err) = first_run::maybe_run_first_run_wizard(skip_config, config_file).await {
+        log::error!("first-run wizard failed: {err:#}");
+    }
+    result
 }
 
 #[derive(Debug)]
@@ -717,7 +740,12 @@ fn build_initial_mux(
     setup_mux(domain, config, default_domain_name, default_workspace_name)
 }
 
-fn run_terminal_gui(opts: StartCommand, default_domain_name: Option<String>) -> anyhow::Result<()> {
+fn run_terminal_gui(
+    opts: StartCommand,
+    default_domain_name: Option<String>,
+    skip_config: bool,
+    config_file: Option<OsString>,
+) -> anyhow::Result<()> {
     if let Some(cls) = opts.class.as_ref() {
         crate::set_window_class(cls);
     }
@@ -779,13 +807,17 @@ fn run_terminal_gui(opts: StartCommand, default_domain_name: Option<String>) -> 
     let activity = Activity::new();
 
     promise::spawn::spawn(async move {
-        if let Err(err) = async_run_terminal_gui(cmd, opts, publish.should_publish()).await {
+        if let Err(err) =
+            async_run_terminal_gui(cmd, opts, publish.should_publish(), skip_config, config_file)
+                .await
+        {
             terminate_with_error(err);
         }
         drop(activity);
     })
     .detach();
 
+    log::info!("Starting GUI event loop");
     maybe_show_configuration_error_window();
     gui.run_forever()
 }
@@ -1249,7 +1281,7 @@ fn run() -> anyhow::Result<()> {
     match sub {
         SubCommand::Start(start) => {
             log::trace!("Using configuration: {:#?}\nopts: {:#?}", config, opts);
-            let res = run_terminal_gui(start, None);
+            let res = run_terminal_gui(start, None, opts.skip_config, opts.config_file.clone());
             wezterm_blob_leases::clear_storage();
             res
         }
@@ -1271,6 +1303,8 @@ fn run() -> anyhow::Result<()> {
                 cwd: None,
             },
             Some(connect.domain_name),
+            true,
+            None,
         ),
         SubCommand::LsFonts(cmd) => run_ls_fonts(config, &cmd),
         SubCommand::ShowKeys(cmd) => run_show_keys(config, &cmd),

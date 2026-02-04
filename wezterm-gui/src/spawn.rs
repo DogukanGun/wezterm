@@ -15,6 +15,7 @@ pub enum SpawnWhere {
     NewWindow,
     NewTab,
     SplitPane(SplitRequest),
+    ReplacePane(mux::pane::PaneId),
 }
 
 pub fn spawn_command_impl(
@@ -120,6 +121,33 @@ pub async fn spawn_command_internal(
                 pane.set_config(term_config);
             } else {
                 bail!("there is no active tab while splitting pane!?");
+            }
+        }
+        SpawnWhere::ReplacePane(pane_id) => {
+            let (domain_id, window_id, tab_id) = mux
+                .resolve_pane_id(pane_id)
+                .ok_or_else(|| anyhow!("pane_id {} invalid", pane_id))?;
+            let tab = mux
+                .get_tab(tab_id)
+                .ok_or_else(|| anyhow!("tab {} not found", tab_id))?;
+            let domain = mux
+                .resolve_spawn_tab_domain(Some(pane_id), &spawn.domain)
+                .context("resolve_spawn_tab_domain")?;
+
+            if domain.state() == mux::domain::DomainState::Detached {
+                domain.attach(Some(window_id)).await?;
+            }
+
+            let pane = domain
+                .spawn_pane(size, cmd_builder, cwd)
+                .await
+                .context("spawn_pane")?;
+            mux.add_pane(&pane)?;
+            pane.set_config(term_config);
+
+            if let Some(old) = tab.replace_pane(pane_id, Arc::clone(&pane))? {
+                old.kill();
+                mux.remove_pane(old.pane_id());
             }
         }
         _ => {

@@ -533,6 +533,11 @@ fn default_message() -> String {
 
 #[derive(Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
 pub enum KeyAssignment {
+    SpawnAIPane,
+    SpawnSolanaAIPane,
+    SpawnCodeModePane,
+    CyclePaneMode,
+    SelectPaneMode,
     SpawnTab(SpawnTabDomain),
     SpawnWindow,
     ToggleFullScreen,

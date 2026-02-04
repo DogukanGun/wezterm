@@ -55,6 +55,14 @@ fn update_symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> anyho
     let original = original.as_ref();
     let link = link.as_ref();
 
+    if !original.exists() {
+        log::warn!(
+            "SSH_AUTH_SOCK target does not exist; skipping agent symlink: {}",
+            original.display()
+        );
+        return Ok(());
+    }
+
     match symlink_file(original, link) {
         Ok(()) => Ok(()),
         Err(err) => {
@@ -104,7 +112,14 @@ impl AgentProxy {
     pub fn default_ssh_auth_sock() -> Option<String> {
         match &config::configuration().default_ssh_auth_sock {
             Some(value) => Some(value.to_string()),
-            None => std::env::var("SSH_AUTH_SOCK").ok(),
+            None => {
+                let value = std::env::var("SSH_AUTH_SOCK").ok()?;
+                if Path::new(&value).exists() {
+                    Some(value)
+                } else {
+                    None
+                }
+            }
         }
     }
 

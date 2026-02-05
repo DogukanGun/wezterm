@@ -830,7 +830,7 @@ struct LocalPaneDCSHandler {
     tmux_domain: Option<Arc<TmuxDomainState>>,
 }
 
-pub(crate) fn emit_output_for_pane(pane_id: PaneId, message: &str) {
+pub fn emit_output_for_pane(pane_id: PaneId, message: &str) {
     let mut parser = termwiz::escape::parser::Parser::new();
     let mut actions = vec![Action::CSI(CSI::Sgr(Sgr::Reset))];
     parser.parse(message.as_bytes(), |action| actions.push(action));

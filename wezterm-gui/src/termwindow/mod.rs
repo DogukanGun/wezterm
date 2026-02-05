@@ -3,7 +3,6 @@ use super::renderstate::*;
 use super::utilsprites::RenderMetrics;
 use crate::colorease::ColorEase;
 use crate::ai;
-use crate::code_mode;
 use crate::frontend::{front_end, try_front_end};
 use crate::inputmap::InputMap;
 use crate::overlay::{
@@ -151,6 +150,8 @@ pub enum TermWindowNotif {
         width: usize,
         height: usize,
     },
+    /// Used by inline AI mode to inject AI response into pane from a background thread.
+    EmitOutputForPane { pane_id: PaneId, text: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,6 +162,8 @@ pub enum UIItemType {
     ScrollThumb,
     BelowScrollThumb,
     Split(PositionedSplit),
+    /// AI panel or other modal overlay; click to give it keyboard focus.
+    Modal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,19 +211,19 @@ pub struct PaneState {
     pub mouse_terminal_coords: Option<(ClickPosition, StableRowIndex)>,
 }
 
+mod ai_panel;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneMode {
     Terminal,
     Ai,
-    Code,
 }
 
 impl PaneMode {
     fn next(self) -> Self {
         match self {
             Self::Terminal => Self::Ai,
-            Self::Ai => Self::Code,
-            Self::Code => Self::Terminal,
+            Self::Ai => Self::Terminal,
         }
     }
 
@@ -228,7 +231,6 @@ impl PaneMode {
         match self {
             Self::Terminal => "Terminal",
             Self::Ai => "AI",
-            Self::Code => "Code",
         }
     }
 }
@@ -470,6 +472,14 @@ pub struct TermWindow {
     dragging: Option<(UIItem, MouseEvent)>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
+    /// When true, keyboard input goes to the modal (e.g. AI panel). When false, input goes to the terminal.
+    modal_keyboard_focus: RefCell<bool>,
+    /// When in AI mode, current line being typed (same pane, no new tab).
+    ai_inline_buffer: RefCell<String>,
+    /// Snapshot of the shell prompt text for inline AI mode.
+    /// Captured when entering `PaneMode::Ai` and reused for subsequent prompts
+    /// so the input line always looks like the terminal prompt.
+    ai_inline_prompt: RefCell<String>,
 
     event_states: HashMap<String, EventState>,
     pub current_event: Option<Value>,
@@ -816,6 +826,9 @@ impl TermWindow {
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
             modal: RefCell::new(None),
+            modal_keyboard_focus: RefCell::new(false),
+            ai_inline_buffer: RefCell::new(String::new()),
+            ai_inline_prompt: RefCell::new(String::new()),
             opengl_info: None,
         };
 
@@ -1383,6 +1396,10 @@ impl TermWindow {
             TermWindowNotif::SetInnerSize { width, height } => {
                 self.set_inner_size(window, width, height);
             }
+            TermWindowNotif::EmitOutputForPane { pane_id, text } => {
+                mux::localpane::emit_output_for_pane(pane_id, &text);
+                window.invalidate();
+            }
         }
 
         Ok(())
@@ -1889,6 +1906,7 @@ impl TermWindow {
 
     pub fn set_modal(&self, modal: Rc<dyn Modal>) {
         self.modal.borrow_mut().replace(modal);
+        *self.modal_keyboard_focus.borrow_mut() = true;
         if let Some(window) = self.window.as_ref() {
             window.invalidate();
         }
@@ -1896,6 +1914,14 @@ impl TermWindow {
 
     fn get_modal(&self) -> Option<Rc<dyn Modal>> {
         self.modal.borrow().as_ref().map(|m| Rc::clone(&m))
+    }
+
+    fn modal_keyboard_focus(&self) -> bool {
+        *self.modal_keyboard_focus.borrow()
+    }
+
+    fn set_modal_keyboard_focus(&self, focus: bool) {
+        *self.modal_keyboard_focus.borrow_mut() = focus;
     }
 
     fn update_scrollbar(&mut self) {
@@ -2333,7 +2359,7 @@ impl TermWindow {
     fn update_mode_status(&self) {
         if let Some(window) = self.window.clone() {
             let status = format!(
-                "Mode: {}  (Shift+Tab to switch)",
+                "Mode: {}  (Shift+Tab to switch)  Panel: Ctrl+Shift+A",
                 self.current_mode.as_str()
             );
             window.notify(TermWindowNotif::SetLeftStatus(status));
@@ -2341,78 +2367,57 @@ impl TermWindow {
     }
 
     fn set_current_mode(&mut self, mode: PaneMode) {
+        match (self.current_mode, mode) {
+            // Leaving AI mode: clear inline state
+            (PaneMode::Ai, m) if m != PaneMode::Ai => {
+                *self.ai_inline_buffer.borrow_mut() = String::new();
+                *self.ai_inline_prompt.borrow_mut() = String::new();
+            }
+            // Entering AI mode: snapshot the current shell prompt from the real
+            // terminal pane (no overlay) so we always get e.g. "(base) user@host ~ % ".
+            (m, PaneMode::Ai) if m != PaneMode::Ai => {
+                if let Some(pane) = self.get_active_pane_no_overlay() {
+                    let cursor = pane.get_cursor_position();
+                    let (_first_row, lines) = pane.get_lines(cursor.y..cursor.y + 1);
+                    let prompt = lines
+                        .first()
+                        .map(|line| line.columns_as_str(0..cursor.x))
+                        .unwrap_or_default();
+                    *self.ai_inline_prompt.borrow_mut() = prompt;
+                } else {
+                    *self.ai_inline_prompt.borrow_mut() = String::new();
+                }
+                *self.ai_inline_buffer.borrow_mut() = String::new();
+            }
+            _ => {}
+        }
         self.current_mode = mode;
-        self.update_mode_status();
-    }
-
-    fn terminal_size_from_pane(&self, pane: &Arc<dyn Pane>) -> TerminalSize {
-        let dims = pane.get_dimensions();
-        TerminalSize {
-            cols: dims.cols,
-            rows: dims.viewport_rows,
-            pixel_width: self.render_metrics.cell_size.width as usize * dims.cols,
-            pixel_height: self.render_metrics.cell_size.height as usize * dims.viewport_rows,
-            dpi: dims.dpi,
+        // Update status and redraw tab bar immediately so the mode indicator
+        // is visible right away (e.g. when switching from Code back to Terminal).
+        let status = format!(
+            "Mode: {}  (Shift+Tab to switch)  Panel: Ctrl+Shift+A",
+            self.current_mode.as_str()
+        );
+        self.left_status = status.clone();
+        if let Some(ref window) = self.window {
+            window.notify(TermWindowNotif::SetLeftStatus(status));
+        }
+        self.update_title_post_status();
+        // Close AI panel overlay if open when switching modes
+        if self
+            .get_modal()
+            .map(|modal| modal.is::<ai_panel::AiPanel>())
+            .unwrap_or(false)
+        {
+            self.cancel_modal();
         }
     }
 
-    fn replace_active_pane(&mut self, new_pane: Arc<dyn Pane>) -> anyhow::Result<()> {
-        let mux = Mux::get();
-        let tab = mux
-            .get_active_tab_for_window(self.mux_window_id)
-            .ok_or_else(|| anyhow::anyhow!("no active tab"))?;
-        let pane = self
-            .get_active_pane_no_overlay()
-            .ok_or_else(|| anyhow::anyhow!("no active pane"))?;
-        if let Some(old) = tab.replace_pane(pane.pane_id(), Arc::clone(&new_pane))? {
-            old.kill();
-            mux.remove_pane(old.pane_id());
-        }
-        Ok(())
-    }
-
-    fn activate_current_mode(&mut self) -> anyhow::Result<()> {
-        match self.current_mode {
-            PaneMode::Terminal => {
-                let pane = self
-                    .get_active_pane_no_overlay()
-                    .ok_or_else(|| anyhow::anyhow!("no active pane"))?;
-                let size = self.terminal_size_from_pane(&pane);
-                self.spawn_command_replace_pane(&SpawnCommand::default(), pane.pane_id(), size);
-            }
-            PaneMode::Ai => {
-                if !self.config.enable_ai_module {
-                    log::warn!("AI module is disabled; enable_ai_module=true to use AI panes");
-                } else if let Some(tab) = Mux::get().get_active_tab_for_window(self.mux_window_id) {
-                    let pane = tab
-                        .get_active_pane()
-                        .ok_or_else(|| anyhow::anyhow!("no active pane"))?;
-                    let size = self.terminal_size_from_pane(&pane);
-                    let new_pane = ai::spawn_ai_pane(size, self.config.clone())?;
-                    self.replace_active_pane(new_pane)?;
-                }
-            }
-            PaneMode::Code => {
-                if !self.config.code_mode_enabled {
-                    log::warn!("Code mode is disabled; enable code_mode_enabled=true");
-                } else if let Some(tab) = Mux::get().get_active_tab_for_window(self.mux_window_id) {
-                    let pane = tab
-                        .get_active_pane()
-                        .ok_or_else(|| anyhow::anyhow!("no active pane"))?;
-                    let size = self.terminal_size_from_pane(&pane);
-                    let new_pane = code_mode::spawn_code_mode_pane(size, self.config.clone())?;
-                    self.replace_active_pane(new_pane)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
 
     fn cycle_mode(&mut self) -> anyhow::Result<()> {
         let next = self.current_mode.next();
         self.set_current_mode(next);
-        self.activate_current_mode()
+        Ok(())
     }
 
     fn show_mode_selector(&mut self) {
@@ -2428,12 +2433,22 @@ impl TermWindow {
             let mode = crate::overlay::mode_selector::select_mode(term, current)?;
             window.notify(TermWindowNotif::Apply(Box::new(move |term_window| {
                 term_window.set_current_mode(mode);
-                let _ = term_window.activate_current_mode();
             })));
             Ok(())
         });
         self.assign_overlay(tab.tab_id(), overlay);
         promise::spawn::spawn(future).detach();
+    }
+
+    fn toggle_ai_panel(&mut self) {
+        if let Some(modal) = self.get_modal() {
+            if modal.is::<ai_panel::AiPanel>() {
+                self.cancel_modal();
+                return;
+            }
+        }
+        let panel = ai_panel::AiPanel::new(self.config.clone());
+        self.set_modal(Rc::new(panel));
     }
 
     fn show_prompt_input_line(&mut self, args: &PromptInputLine) {
@@ -2797,23 +2812,14 @@ impl TermWindow {
                 ]);
                 self.spawn_command(&spawn, SpawnWhere::NewTab);
             }
-            SpawnCodeModePane => {
-                if !self.config.code_mode_enabled {
-                    log::warn!("Code mode is disabled; enable code_mode_enabled=true");
-                } else if let Some(tab) = Mux::get().get_active_tab_for_window(self.mux_window_id) {
-                    let size = tab.get_size();
-                    code_mode::spawn_code_mode_tab_in_window(
-                        size,
-                        Some(self.mux_window_id),
-                        self.config.clone(),
-                    )?;
-                }
-            }
             CyclePaneMode => {
                 self.cycle_mode()?;
             }
             SelectPaneMode => {
                 self.show_mode_selector();
+            }
+            ToggleAiPanel => {
+                self.toggle_ai_panel();
             }
             SpawnCommandInNewTab(spawn) => {
                 self.spawn_command(spawn, SpawnWhere::NewTab);

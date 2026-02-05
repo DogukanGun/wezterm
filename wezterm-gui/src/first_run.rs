@@ -138,11 +138,10 @@ fn run_wizard(mut term: TermWizTerminal) -> anyhow::Result<()> {
         }
     }
 
-    let code_mode_enabled = true;
     let code_mode_auto_accept = prompt_bool(
         &mut term,
         &mut host,
-        "Code Mode auto-accept commands? (y/N)",
+        "AI Panel auto-run suggested commands? (y/N)",
         false,
     )?;
 
@@ -164,7 +163,6 @@ fn run_wizard(mut term: TermWizTerminal) -> anyhow::Result<()> {
         } else {
             Some(solana_rpc_url)
         },
-        code_mode_enabled,
         code_mode_auto_accept,
     )?;
 
@@ -182,7 +180,6 @@ fn write_config(
     ai_model: Option<String>,
     ollama_base_url: &str,
     solana_rpc_url: Option<String>,
-    code_mode_enabled: bool,
     code_mode_auto_accept: bool,
 ) -> anyhow::Result<()> {
     let config_path = HOME_DIR.join(".wezterm.lua");
@@ -243,10 +240,6 @@ fn write_config(
     lines.push("    },".to_string());
     lines.push("  },".to_string());
 
-    lines.push(format!(
-        "  code_mode_enabled = {},",
-        if code_mode_enabled { "true" } else { "false" }
-    ));
     lines.push(format!(
         "  code_mode_auto_accept = {},",
         if code_mode_auto_accept { "true" } else { "false" }

@@ -689,17 +689,9 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &[],
             icon: Some("md_terminal"),
         },
-        SpawnCodeModePane => CommandDef {
-            brief: "Spawn Code Mode pane".into(),
-            doc: "Open a code agent pane with planning and approvals".into(),
-            keys: vec![],
-            args: &[ArgType::ActivePane],
-            menubar: &[],
-            icon: Some("md_terminal"),
-        },
         CyclePaneMode => CommandDef {
             brief: "Cycle pane mode".into(),
-            doc: "Switch to the next pane mode (Terminal, AI, Code)".into(),
+            doc: "Switch to the next pane mode (Terminal, AI)".into(),
             keys: vec![(Modifiers::SHIFT, "Tab".into())],
             args: &[ArgType::ActivePane],
             menubar: &["Shell"],
@@ -707,11 +699,19 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
         },
         SelectPaneMode => CommandDef {
             brief: "Select pane mode".into(),
-            doc: "Choose a pane mode (Terminal, AI, Code)".into(),
+            doc: "Choose a pane mode (Terminal, AI)".into(),
             keys: vec![],
             args: &[ArgType::ActivePane],
             menubar: &["Shell"],
             icon: Some("md_tune"),
+        },
+        ToggleAiPanel => CommandDef {
+            brief: "Toggle AI panel".into(),
+            doc: "Show or hide the AI overlay panel".into(),
+            keys: vec![(Modifiers::CTRL.union(Modifiers::SHIFT), "a".into())],
+            args: &[ArgType::ActivePane],
+            menubar: &["Shell"],
+            icon: Some("md_chat_bubble"),
         },
         ToggleFullScreen => CommandDef {
             brief: "Toggle full screen mode".into(),
@@ -2082,6 +2082,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ResetTerminal,
         CyclePaneMode,
         SelectPaneMode,
+        ToggleAiPanel,
         // ----------------- Edit
         #[cfg(not(target_os = "macos"))]
         PasteFrom(ClipboardPasteSource::PrimarySelection),

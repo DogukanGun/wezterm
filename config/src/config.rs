@@ -305,11 +305,7 @@ pub struct Config {
     #[dynamic(default)]
     pub solana_rpc_url: Option<String>,
 
-    /// Enable the code agent mode.
-    #[dynamic(default)]
-    pub code_mode_enabled: bool,
-
-    /// Auto-accept command execution in code mode.
+    /// Auto-accept command execution in AI panel (run suggested commands in terminal without y/n).
     #[dynamic(default)]
     pub code_mode_auto_accept: bool,
 

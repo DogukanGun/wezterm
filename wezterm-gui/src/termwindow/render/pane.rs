@@ -5,7 +5,7 @@ use crate::termwindow::render::{
     same_hyperlink, CursorProperties, LineQuadCacheKey, LineQuadCacheValue, LineToEleShapeCacheKey,
     RenderScreenLineParams,
 };
-use crate::termwindow::{ScrollHit, UIItem, UIItemType};
+use crate::termwindow::{PaneMode, ScrollHit, UIItem, UIItemType};
 use ::window::bitmaps::TextureRect;
 use ::window::DeadKeyStatus;
 use anyhow::Context;
@@ -375,6 +375,13 @@ impl crate::TermWindow {
                     line: &&mut Line,
                 ) -> anyhow::Result<()> {
                     let stable_row = stable_top + line_idx as StableRowIndex;
+                    // In AI mode the cursor line is drawn by the inline overlay only
+                    if self.pos.is_active
+                        && self.term_window.current_mode == PaneMode::Ai
+                        && stable_row == self.cursor.y
+                    {
+                        return Ok(());
+                    }
                     let selrange = self
                         .selrange
                         .map_or(0..0, |sel| sel.cols_for_row(stable_row, self.rectangular));

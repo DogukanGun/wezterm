@@ -25,7 +25,7 @@ impl LineEditorHost for ModeSelectorHost {
 pub fn select_mode(mut term: TermWizTerminal, current: PaneMode) -> anyhow::Result<PaneMode> {
     term.no_grab_mouse_in_raw_mode();
     term.render(&[
-        Change::Text("Select pane mode (terminal/ai/code).\r\n".to_string()),
+        Change::Text("Select pane mode (terminal/ai).\r\n".to_string()),
         Change::Text("Press Enter to keep the current mode.\r\n\r\n".to_string()),
     ])?;
 
@@ -42,7 +42,6 @@ pub fn select_mode(mut term: TermWizTerminal, current: PaneMode) -> anyhow::Resu
     let selected = match choice.as_str() {
         "terminal" | "term" | "t" => PaneMode::Terminal,
         "ai" | "a" => PaneMode::Ai,
-        "code" | "c" => PaneMode::Code,
         _ => {
             term.render(&[Change::Text(
                 "\r\nInvalid choice, keeping current mode.\r\n".to_string(),

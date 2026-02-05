@@ -43,7 +43,8 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_) => {}
+            | UIItemType::Split(_)
+            | UIItemType::Modal => {}
         }
     }
 
@@ -54,7 +55,8 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_) => {}
+            | UIItemType::Split(_)
+            | UIItemType::Modal => {}
         }
     }
 
@@ -216,6 +218,16 @@ impl super::TermWindow {
             None
         };
 
+        if capture_mouse && self.get_modal().is_some() {
+            let on_modal = ui_item
+                .as_ref()
+                .map(|i| matches!(i.item_type, UIItemType::Modal))
+                .unwrap_or(false);
+            if !on_modal {
+                self.set_modal_keyboard_focus(false);
+            }
+        }
+
         if let Some(item) = ui_item.clone() {
             if capture_mouse {
                 self.current_mouse_capture = Some(MouseCapture::UI);
@@ -375,6 +387,10 @@ impl super::TermWindow {
             }
             UIItemType::BelowScrollThumb => {
                 self.mouse_event_below_scroll_thumb(item, pane, event, context);
+            }
+            UIItemType::Modal => {
+                self.set_modal_keyboard_focus(true);
+                context.invalidate();
             }
             UIItemType::Split(split) => {
                 self.mouse_event_split(item, split, event, context);

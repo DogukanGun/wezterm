@@ -384,3 +384,25 @@ fn normalize_line_endings(text: &str) -> String {
     let normalized = text.replace("\r\n", "\n");
     normalized.replace('\n', "\r\n")
 }
+
+/// One-shot AI request for inline mode: same behavior as run_ai_loop (Ollama
+/// readiness, command extraction/execution) but returns the string to show.
+pub fn get_ai_response(config: &ConfigHandle, message: &str) -> anyhow::Result<String> {
+    if matches!(config.ai_provider, AiProvider::Ollama) {
+        let _ = ollama::ensure_ollama_ready(
+            &config.ai_ollama_base_url,
+            config.ai_model.as_deref(),
+            |_| {},
+        );
+    }
+    let reply = send_message(config, message)?;
+    if let Some(command) = extract_command(&reply).or_else(|| infer_command(&reply)) {
+        let output = match execute_command(&command) {
+            Ok(out) => out,
+            Err(err) => format!("Error: {err:#}"),
+        };
+        Ok(normalize_line_endings(&output))
+    } else {
+        Ok(reply)
+    }
+}

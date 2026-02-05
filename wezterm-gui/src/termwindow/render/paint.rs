@@ -1,10 +1,17 @@
+use crate::termwindow::box_model::{
+    Element, ElementColors, ElementContent, LayoutContext,
+};
 use crate::termwindow::{RenderFrame, TermWindowNotif};
 use ::window::bitmaps::atlas::OutOfTextureSpace;
 use ::window::WindowOps;
 use anyhow::Context;
+use config::DimensionContext;
+use mux::tab::PositionedPane;
 use smol::Timer;
 use std::time::{Duration, Instant};
 use wezterm_font::ClearShapeCache;
+use euclid::rect;
+use window::color::LinearRgba;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllowImage {
@@ -143,6 +150,127 @@ impl crate::TermWindow {
         }
     }
 
+    /// Row Y and geometry for the AI inline line at the pane's cursor (so you type where the prompt is).
+    fn ai_inline_line_geometry(
+        &self,
+        pos: &PositionedPane,
+    ) -> (f32, f32, f32, f32) {
+        let (padding_left, padding_top) = self.padding_left_top();
+        let tab_bar_height = self.tab_bar_pixel_height().unwrap_or(0.);
+        let (top_bar_height, _bottom_bar_height) = if self.config.tab_bar_at_bottom {
+            (0.0, tab_bar_height)
+        } else {
+            (tab_bar_height, 0.0)
+        };
+        let border = self.get_os_border();
+        let top_pixel_y = top_bar_height + padding_top + border.top.get() as f32;
+        let cell_width = self.render_metrics.cell_size.width as f32;
+        let cell_height = self.render_metrics.cell_size.height as f32;
+
+        let dims = pos.pane.get_dimensions();
+        let viewport_top = self
+            .get_viewport(pos.pane.pane_id())
+            .unwrap_or(dims.physical_top);
+        let cursor = pos.pane.get_cursor_position();
+        let line_idx = (cursor.y - viewport_top)
+            .max(0)
+            .min((dims.viewport_rows as isize).saturating_sub(1)) as usize;
+        let row_y = top_pixel_y + (pos.top + line_idx) as f32 * cell_height;
+        let line_left = padding_left + border.left.get() as f32 + pos.left as f32 * cell_width;
+        let line_width = pos.width as f32 * cell_width;
+        (row_y, line_left, line_width, cell_height)
+    }
+
+    /// Draw only the background rect for the AI inline line (uses existing layers borrow).
+    fn paint_ai_inline_line_background(
+        &mut self,
+        layers: &mut crate::quad::TripleLayerQuadAllocator,
+        pos: &PositionedPane,
+    ) -> anyhow::Result<()> {
+        let (row_y, line_left, line_width, cell_height) = self.ai_inline_line_geometry(pos);
+        let palette = pos.pane.palette();
+        let bg = palette.background.to_linear();
+
+        self.filled_rectangle(
+            layers,
+            0,
+            rect(line_left, row_y, line_width, cell_height),
+            bg,
+        )
+        .context("ai inline bg rect")?;
+        Ok(())
+    }
+
+    /// Draw the AI inline prompt + buffer text. Called after layers borrow is released
+    /// so that render_element can take its own quad_allocator.
+    fn paint_ai_inline_line_text(&mut self) -> anyhow::Result<()> {
+        use crate::termwindow::box_model::BorderColor;
+
+        let active_pos = match self.get_panes_to_render().into_iter().find(|p| p.is_active) {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let pos = &active_pos;
+
+        let (row_y, line_left, line_width, cell_height) = self.ai_inline_line_geometry(pos);
+
+        let palette = pos.pane.palette();
+        let fg = palette.foreground.to_linear();
+
+        let buffer = self.ai_inline_buffer.borrow().clone();
+        let mut line_text = String::new();
+
+        // Prefer the snapshot captured when we entered AI mode so that the
+        // prompt stays visually identical across interactions.
+        let prompt = self.ai_inline_prompt.borrow().clone();
+        if !prompt.is_empty() {
+            line_text.push_str(&prompt);
+        } else {
+            // Fallback: derive prompt from the current cursor line if we don't
+            // have a snapshot (e.g. AI mode was enabled before this field existed).
+            let cursor = pos.pane.get_cursor_position();
+            let (_first_row, line_vec) = pos.pane.get_lines(cursor.y..cursor.y + 1);
+            if let Some(line) = line_vec.first() {
+                line_text.push_str(&line.columns_as_str(0..cursor.x));
+            }
+        }
+        line_text.push_str(&buffer);
+        let font_style = self
+            .config
+            .command_palette_font
+            .as_ref()
+            .unwrap_or(&self.config.font);
+        let font = self.fonts.resolve_font(font_style).context("resolve font")?;
+        let metrics = crate::utilsprites::RenderMetrics::with_font_metrics(&font.metrics());
+
+        let bounds = rect(line_left, row_y, line_width, cell_height);
+        let layout_ctx = LayoutContext {
+            height: DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.dimensions.pixel_height as f32,
+                pixel_cell: metrics.cell_size.height as f32,
+            },
+            width: DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.dimensions.pixel_width as f32,
+                pixel_cell: metrics.cell_size.width as f32,
+            },
+            bounds,
+            metrics: &metrics,
+            gl_state: self.render_state.as_ref().unwrap(),
+            zindex: 0,
+        };
+        let element = Element::new(&font, ElementContent::Text(line_text)).colors(ElementColors {
+            border: BorderColor::default(),
+            bg: LinearRgba::TRANSPARENT.into(),
+            text: fg.into(),
+        });
+        let computed = self.compute_element(&layout_ctx, &element)?;
+        let gl_state = self.render_state.as_ref().unwrap();
+        self.render_element(&computed, gl_state, None)?;
+        Ok(())
+    }
+
     pub fn paint_modal(&mut self) -> anyhow::Result<()> {
         if let Some(modal) = self.get_modal() {
             for computed in modal.computed_element(self)?.iter() {
@@ -257,6 +385,13 @@ impl crate::TermWindow {
             self.paint_pane(&pos, &mut layers).context("paint_pane")?;
         }
 
+        if self.current_mode == crate::termwindow::PaneMode::Ai {
+            if let Some(active_pos) = self.get_panes_to_render().into_iter().find(|p| p.is_active) {
+                self.paint_ai_inline_line_background(&mut layers, &active_pos)
+                    .context("paint_ai_inline_line_background")?;
+            }
+        }
+
         if let Some(pane) = self.get_active_pane_or_overlay() {
             let splits = self.get_splits();
             for split in &splits {
@@ -272,6 +407,11 @@ impl crate::TermWindow {
         self.paint_window_borders(&mut layers)
             .context("paint_window_borders")?;
         drop(layers);
+
+        if self.current_mode == crate::termwindow::PaneMode::Ai {
+            self.paint_ai_inline_line_text()
+                .context("paint_ai_inline_line_text")?;
+        }
         self.paint_modal().context("paint_modal")?;
 
         Ok(())

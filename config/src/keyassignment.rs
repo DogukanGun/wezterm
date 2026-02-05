@@ -535,9 +535,9 @@ fn default_message() -> String {
 pub enum KeyAssignment {
     SpawnAIPane,
     SpawnSolanaAIPane,
-    SpawnCodeModePane,
     CyclePaneMode,
     SelectPaneMode,
+    ToggleAiPanel,
     SpawnTab(SpawnTabDomain),
     SpawnWindow,
     ToggleFullScreen,

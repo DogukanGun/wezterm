@@ -124,7 +124,7 @@ pub async fn spawn_command_internal(
             }
         }
         SpawnWhere::ReplacePane(pane_id) => {
-            let (domain_id, window_id, tab_id) = mux
+            let (_domain_id, window_id, tab_id) = mux
                 .resolve_pane_id(pane_id)
                 .ok_or_else(|| anyhow!("pane_id {} invalid", pane_id))?;
             let tab = mux

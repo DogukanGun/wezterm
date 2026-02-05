@@ -1,4 +1,5 @@
 use crate::termwindow::InputMap;
+use crate::termwindow::TermWindowNotif;
 use ::window::{
     DeadKeyStatus, KeyCode, KeyEvent, KeyboardLedStatus, Modifiers, RawKeyEvent, WindowOps,
 };
@@ -269,18 +270,27 @@ impl super::TermWindow {
         }
 
         if is_down {
-            if only_key_bindings == OnlyKeyBindings::No {
+            if only_key_bindings == OnlyKeyBindings::No && self.modal_keyboard_focus() {
                 if let Some(modal) = self.get_modal() {
-                    if let Key::Code(term_key) = self.win_key_code_to_termwiz_key_code(keycode) {
-                        match modal.key_down(term_key, raw_modifiers.remove_positional_mods(), self)
-                        {
+                    let mods = raw_modifiers.remove_positional_mods();
+                    match self.win_key_code_to_termwiz_key_code(keycode) {
+                        Key::Code(term_key) => match modal.key_down(term_key, mods, self) {
                             Ok(true) => return true,
                             Ok(false) => {}
                             Err(err) => {
                                 log::error!("Error dispatching key to modal: {err:#}");
                                 return true;
                             }
+                        },
+                        Key::Composed(s) => {
+                            for ch in s.chars() {
+                                modal
+                                    .key_down(wezterm_term::KeyCode::Char(ch), mods, self)
+                                    .ok();
+                            }
+                            return true;
                         }
+                        Key::None => {}
                     }
                 }
             }
@@ -463,6 +473,27 @@ impl super::TermWindow {
             None => return,
         };
 
+        // When a modal has keyboard focus, give it first chance at key events.
+        // Otherwise keys go to the terminal (click panel to focus it).
+        if key.key_is_down && self.modal_keyboard_focus() {
+            if let Some(_modal) = self.get_modal() {
+                if self.process_key(
+                    &pane,
+                    context,
+                    &key.key,
+                    key.modifiers,
+                    leader_active,
+                    leader_mod,
+                    OnlyKeyBindings::No,
+                    true,
+                    None,
+                ) {
+                    key.set_handled();
+                    return;
+                }
+            }
+        }
+
         // First, try to match raw physical key
         let phys_key = match &key.key {
             phys @ KeyCode::Physical(_) => Some(phys.clone()),
@@ -596,6 +627,67 @@ impl super::TermWindow {
         }
     }
 
+    fn handle_ai_inline_key(
+        &mut self,
+        pane: &Arc<dyn Pane>,
+        key: &Key,
+        key_is_down: bool,
+        context: &dyn WindowOps,
+    ) {
+        if !key_is_down {
+            return;
+        }
+        let pane_id = pane.pane_id();
+        let mut invalidate = false;
+        match key {
+            Key::Code(::termwiz::input::KeyCode::Char(c)) => {
+                self.ai_inline_buffer.borrow_mut().push(*c);
+                invalidate = true;
+            }
+            Key::Code(::termwiz::input::KeyCode::Backspace) => {
+                let mut buf = self.ai_inline_buffer.borrow_mut();
+                if buf.pop().is_some() {
+                    invalidate = true;
+                }
+            }
+            Key::Code(::termwiz::input::KeyCode::Enter) => {
+                let line = self.ai_inline_buffer.borrow().trim().to_string();
+                self.ai_inline_buffer.borrow_mut().clear();
+                invalidate = true;
+                if line.is_empty() {
+                    if invalidate {
+                        context.invalidate();
+                    }
+                    return;
+                }
+                mux::localpane::emit_output_for_pane(pane_id, &format!("{line}\r\n"));
+                let config = self.config.clone();
+                let window = self.window.clone();
+                std::thread::spawn(move || {
+                    let text = match crate::ai::get_ai_response(&config, &line) {
+                        Ok(t) => format!("{t}\r\n\r\n"),
+                        Err(e) => format!("Error: {e:#}\r\n\r\n"),
+                    };
+                    if let Some(win) = window {
+                        win.notify(TermWindowNotif::EmitOutputForPane { pane_id, text });
+                    }
+                });
+            }
+            Key::Code(::termwiz::input::KeyCode::Escape) => {
+                self.ai_inline_buffer.borrow_mut().clear();
+                invalidate = true;
+            }
+            Key::Composed(s) => {
+                self.ai_inline_buffer.borrow_mut().push_str(s);
+                invalidate = true;
+            }
+            _ => {}
+        }
+        if invalidate {
+            context.invalidate();
+        }
+    }
+
     pub fn key_event_impl(&mut self, window_key: KeyEvent, context: &dyn WindowOps) {
         let pane = match self.get_active_pane_or_overlay() {
             Some(pane) => pane,
@@ -651,6 +743,11 @@ impl super::TermWindow {
 
         let key = self.win_key_code_to_termwiz_key_code(&window_key.key);
 
+        if self.current_mode == super::PaneMode::Ai {
+            self.handle_ai_inline_key(&pane, &key, window_key.key_is_down, context);
+            return;
+        }
+
         match key {
             Key::Code(key) => {
                 if window_key.key_is_down && !key.is_modifier() {
@@ -664,11 +761,13 @@ impl super::TermWindow {
                     self.key_table_state.did_process_key();
                 }
 
-                if let Some(modal) = self.get_modal() {
-                    if window_key.key_is_down {
-                        modal.key_down(key, modifiers, self).ok();
+                if self.modal_keyboard_focus() {
+                    if let Some(modal) = self.get_modal() {
+                        if window_key.key_is_down {
+                            modal.key_down(key, modifiers, self).ok();
+                        }
+                        return;
                     }
-                    return;
                 }
 
                 let res = if let Some(encoded) = self.encode_win32_input(&pane, &window_key) {
@@ -732,6 +831,16 @@ impl super::TermWindow {
                     return;
                 }
                 self.key_table_state.did_process_key();
+                if self.modal_keyboard_focus() {
+                    if let Some(modal) = self.get_modal() {
+                        for ch in s.chars() {
+                            modal
+                                .key_down(wezterm_term::KeyCode::Char(ch), modifiers, self)
+                                .ok();
+                        }
+                        return;
+                    }
+                }
                 if self.config.debug_key_events {
                     log::info!("send to pane string={:?}", s);
                 }
